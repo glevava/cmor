@@ -299,35 +299,31 @@ class checkCMIP6(object):
                 cmip6_cv.set_cur_dataset_attribute(attribute, self.dictGbl[attribute])
 
     @staticmethod
-    def is_climatology(filename, **kwargs):
-        return True if filename.find('-clim') != -1 else False
+    def _test_is_climatology(filename, **kwargs):
+        return 'Clim' if filename.find('-clim') != -1 else None
 
     @staticmethod
-    def has_3_dimensions(infile, variable, **kwargs):
-        return True if len(infile.variables[variable].dimensions) == 3 else False
+    def _test_has_3_dimensions(infile, variable, **kwargs):
+        return '2d' if len(infile.variables[variable].dimensions) == 3 else None
 
     @staticmethod
-    def has_27_pressure_levels(infile, **kwargs):
-        dim = [d for d in list(infile.dimensions.keys()) if 'plev' in d]
-        return True if len(dim) == 1 and infile.dimensions[dim[0]] == 27 else False
+    def _test_has_27_pressure_levels(infile, **kwargs):
+        dim = [d for d in infile.dimensions.keys() if 'plev' in d]
+        return '27' if len(dim) == 1 and infile.dimensions[dim[0]] == 27 else None
 
     @staticmethod
-    def has_7_pressure_levels(infile, **kwargs):
-        dim = [d for d in list(infile.dimensions.keys()) if 'plev' in d]
-        return True if len(dim) == 1 and infile.dimensions[dim[0]] == 7 else False
+    def _test_has_7_pressure_levels(infile, **kwargs):
+        dim = [d for d in infile.dimensions.keys() if 'plev' in d]
+        return '7h' if len(dim) == 1 and infile.dimensions[dim[0]] == 7 else None
 
     @staticmethod
-    def has_4_pressure_levels(infile, **kwargs):
-        dim = [d for d in list(infile.dimensions.keys()) if 'plev' in d]
-        return True if len(dim) == 1 and infile.dimensions[dim[0]] == 4 else False
+    def _test_has_4_pressure_levels(infile, **kwargs):
+        dim = [d for d in infile.dimensions.keys() if 'plev' in d]
+        return '4' if len(dim) == 1 and infile.dimensions[dim[0]] == 4 else None
 
     @staticmethod
-    def has_land_in_cell_methods(infile, variable, **kwargs):
-        return True if 'land' in infile.variables[variable].cell_methods else False
-
-    @staticmethod
-    def has_variable_name(filename, **kwargs):
-        return True
+    def _test_has_land_in_cell_methods(infile, variable, **kwargs):
+        return 'land' if 'land' in infile.variables[variable].cell_methods else None
 
     def ControlVocab(self, ncfile, variable=None, print_all=True):
         """
@@ -348,6 +344,13 @@ class checkCMIP6(object):
            11. Validate that all *_index are integers.
 
         """
+        # -------------------------------------------------------------------
+        #  Open file in processing
+        # -------------------------------------------------------------------
+        infile = Cdunif.CdunifFile(ncfile, "r")
+        # -------------------------------------------------------------------
+        #  Get filename
+        # -------------------------------------------------------------------
         filename = os.path.basename(ncfile)
         # -------------------------------------------------------------------
         #  Initialize arrays
@@ -355,8 +358,17 @@ class checkCMIP6(object):
         # If table_path is the table directory
         # Deduce corresponding JSON from filename
         if os.path.isdir(self.cmip6_table_path):
-            cmip6_table = '{}/CMIP6_{}.json'.format(
-                self.cmip6_table_path, self._get_table_from_filename(filename))
+            # In case automated DR version switch is implemented elsewhere out of PrePARE
+            # Skip if the --table-path ends with "Tables" or a DR tag (e.g., 01.00.28)
+            if self.cmip6_table_path.endswith('Tables') or self.cmip6_table_path.endswith(infile.data_specs_version):
+                cmip6_table = '{}/CMIP6_{}.json'.format(
+                    self.cmip6_table_path,
+                    self._get_table_from_filename(filename))
+            else:
+                cmip6_table = '{}/{}/CMIP6_{}.json'.format(
+                    self.cmip6_table_path,
+                    infile.data_specs_version,
+                    self._get_table_from_filename(filename))
         else:
             cmip6_table = self.cmip6_table_path
         table_id = os.path.basename(os.path.splitext(cmip6_table)[0]).split('_')[1]
@@ -377,30 +389,36 @@ class checkCMIP6(object):
         # -------------------------------------------------------------------
         #  Distinguish similar CMOR entries with the same out_name if exist
         # -------------------------------------------------------------------
-        # Apply test on variable only if a particular treatment if required
-        prepare_path = os.path.dirname(os.path.realpath(__file__))
-        out_names_tests = json.loads(open(os.path.join(prepare_path, 'out_names_tests.json')).read())
-        # -------------------------------------------------------------------
-        #  Open file in processing
-        #  The file needs to be open before the calling the test.
-        # -------------------------------------------------------------------
-        infile = Cdunif.CdunifFile(ncfile, "r")
-        key = '{}_{}'.format(table_id, variable_id)
-        variable_cmor_entry = None
-        if key in list(out_names_tests.keys()):
-            for test, cmor_entry in list(out_names_tests[key].items()):
-                if getattr(self, test)(**{'infile': infile,
-                                          'variable': variable,
-                                          'filename': filename}):
-                    # If test successfull, the CMOR entry to consider is given by the test
-                    variable_cmor_entry = cmor_entry
-                else:
-                    # If not, CMOR entry to consider is the variable from filename or from input command-line
-                    variable_cmor_entry = variable
+        # The goal is to deduce here the CMOR entry to consider for the check.
+        # Some variables (called "out_names" into CMOR table) corresponds to several CMOR entries in the same table.
+        # i.e., several CMOR entries have the same out_name value.
+        # 1. For the considered variable --> get all (CMOR entries, out_name) pairs in the CMOR table where out_name = variable
+        cmor_entries = cmor_table['variable_entry']
+        var_entries = [(f, cmor_entries[f]['out_name']) for f in cmor_entries if cmor_entries[f]['out_name'] == variable]
+        # 2. Raise an error if no corresponding out_name found (i.e., var_entires = [])
+        if not var_entries:
+            print(BCOLORS.FAIL)
+            print("==========================================================================")
+            print("CMOR entry with out_name " + variable + " could not be found in CMOR table")
+            print("==========================================================================")
+            print(BCOLORS.ENDC)
+            raise KeyboardInterrupt
+        # 2. If only one pair --> consider this entry
+        if len(var_entries) == 1:
+            variable_cmor_entry = var_entries[0][0]
         else:
-            # By default, CMOR entry to consider is the variable from filename or from input command-line
+        # 3. If several entries --> apply additional tests to the file (i.e., is_climatology, has_7_pressure_levels, etc.)
+            # Make "variable" as CMOR entry to consider by default/roollback in case of no successful test.
             variable_cmor_entry = variable
-        # -------------------------------------------------------------------
+            for test in [t for t in dir(self) if t.startswith('_test')]:
+                suffix = getattr(self, test)(**{'infile': infile, 'variable': variable, 'filename': filename})
+                # If one test is successful, get the appropriate suffix
+                # Test if "variable" + "suffix" exists as a CMOR entry
+                if suffix and variable + suffix in cmor_entries:
+                    variable_cmor_entry = variable + suffix
+                    # Break the loop as no variable passes several tests.
+                    break
+        #  -------------------------------------------------------------------
         #  Get variable out name in netCDF record
         #  -------------------------------------------------------------------
         # Variable record name should follow CMOR table out names
@@ -636,7 +654,6 @@ class checkCMIP6(object):
                 self.errors += 1
         # Print final message
         if self.errors != 0:
-            print(BCOLORS.FAIL + "└──> :: CV FAIL    :: {}".format(ncfile) + BCOLORS.ENDC)
             raise KeyboardInterrupt
         elif print_all:
             print(BCOLORS.OKGREEN + "     :: CV SUCCESS :: {}".format(ncfile) + BCOLORS.ENDC)
@@ -665,6 +682,7 @@ def sequential_process(source):
             checker.ControlVocab(source, print_all=pctx.all)
         return 0
     except KeyboardInterrupt:
+        print(BCOLORS.FAIL + "└──> :: CV FAIL    :: {}".format(source) + BCOLORS.ENDC)
         return 1
     except Exception as e:
         print(e)
@@ -755,7 +773,10 @@ def main():
         default=os.environ['CMIP6_CMOR_TABLES'] if 'CMIP6_CMOR_TABLES' in list(os.environ.keys()) else './Tables',
         help='Specify the CMIP6 CMOR tables path (JSON file).\n'
              'If not submitted read the CMIP6_CMOR_TABLES environment variable if exists.\n'
-             'If a directory is submitted table is deduced from filename (default is "./Tables").')
+             'If a directory is submitted table is deduced from filename (default is "./Tables").\n'
+             'If the submitted directory do not end with "Tables", the table path expected is \n'
+             '"<table-dir>/<data_specs_version>" where "data_specs_version" is deduced from global \n'
+             'attributes of each processed file.')
 
     parser.add_argument(
         '--max-processes',
