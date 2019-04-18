@@ -20,6 +20,7 @@ Created on Fri Feb 19 11:33:52 2016
 """
 
 from __future__ import print_function
+
 import argparse
 import itertools
 import json
@@ -32,10 +33,9 @@ from datetime import datetime
 from multiprocessing import Pool
 from uuid import uuid4 as uuid
 
-import numpy
-
-from cdms2 import Cdunif
+import cdms2
 import cmip6_cv
+import numpy
 
 
 # =========================
@@ -212,6 +212,17 @@ class ProcessContext(object):
 
 
 # =========================
+# Print Error method()
+# =========================
+def print_err(msg):
+    print(BCOLORS.FAIL)
+    print("==========================================================================")
+    print(msg)
+    print("==========================================================================")
+    print(BCOLORS.ENDC)
+
+
+# =========================
 # checkCMIP6()
 # =========================
 class checkCMIP6(object):
@@ -225,7 +236,7 @@ class checkCMIP6(object):
     Input:
         args.cmip6_table:  CMIP6 table used to creat this file,
                            variable attributes and dimensions will be controled.
-        args.CV:           Controled Vocabulary "json" file.
+        args.CV:           Controlled Vocabulary "json" file.
 
     Output:
         outfile:      Log file, default is stdout.
@@ -271,14 +282,25 @@ class checkCMIP6(object):
         cmip6_cv.set_cur_dataset_attribute(
             cmip6_cv.CMOR_FORMULA_VAR_FILE,
             "CMIP6_formula_terms.json")
-
-    @staticmethod
-    def _get_variable_from_filename(f):
-        return f.split('_')[0]
-
-    @staticmethod
-    def _get_table_from_filename(f):
-        return f.split('_')[1]
+        # -------------------------------------------------------------------
+        # Set axis attributes to ignore & skip
+        # -------------------------------------------------------------------
+        self._AXIS_IGNORED_ATTRS = ["long_name",
+                                    "comment",
+                                    "requested",
+                                    "out_name",
+                                    "must_have_bounds",
+                                    "bounds_values",
+                                    "value",
+                                    "z_bounds_factors",
+                                    "valid_min",
+                                    "tolerance",
+                                    "z_factors",
+                                    "type",
+                                    "requested_bounds",
+                                    "stored_direction",
+                                    "generic_level_name",
+                                    "valid_max"]
 
     @staticmethod
     def _check_json_table(path):
@@ -299,31 +321,68 @@ class checkCMIP6(object):
                 cmip6_cv.set_cur_dataset_attribute(attribute, self.dictGbl[attribute])
 
     @staticmethod
-    def _test_is_climatology(filename, **kwargs):
-        return 'Clim' if filename.find('-clim') != -1 else None
+    def _test_is_climatology(infile, **kwargs):
+        return 'Clim' if os.path.basename(infile.id).find('-clim') != -1 else None
 
     @staticmethod
     def _test_has_3_dimensions(infile, variable, **kwargs):
-        return '2d' if len(infile.variables[variable].dimensions) == 3 else None
+        return '2d' if len(infile.variables[variable].listdimnames()) == 3 else None
 
     @staticmethod
     def _test_has_27_pressure_levels(infile, **kwargs):
-        dim = [d for d in infile.dimensions.keys() if 'plev' in d]
-        return '27' if len(dim) == 1 and infile.dimensions[dim[0]] == 27 else None
+        return '27' if 'plev' in infile.listdimension() and int(infile.axes['plev'].shape[0]) == 27 else None
 
     @staticmethod
     def _test_has_7_pressure_levels(infile, **kwargs):
-        dim = [d for d in infile.dimensions.keys() if 'plev' in d]
-        return '7h' if len(dim) == 1 and infile.dimensions[dim[0]] == 7 else None
+        return '7h' if 'plev' in infile.listdimension() and int(infile.axes['plev'].shape[0]) == 7 else None
 
     @staticmethod
     def _test_has_4_pressure_levels(infile, **kwargs):
-        dim = [d for d in infile.dimensions.keys() if 'plev' in d]
-        return '4' if len(dim) == 1 and infile.dimensions[dim[0]] == 4 else None
+        return '4' if 'plev' in infile.listdimension() and int(infile.axes['plev'].shape[0]) == 4 else None
 
     @staticmethod
     def _test_has_land_in_cell_methods(infile, variable, **kwargs):
         return 'land' if 'land' in infile.variables[variable].cell_methods else None
+
+    def _find_cmor_entry(self, variable, infile, cmor_dict, axis=False):
+        # -------------------------------------------------------------------
+        #  Distinguish similar CMOR entries with the same out_name if exist
+        # -------------------------------------------------------------------
+        # The goal is to deduce here the CMOR entry to consider for the check.
+        # Some variables (called "out_names" into CMOR table) corresponds to several CMOR entries in the same table.
+        # i.e., several CMOR entries have the same out_name value.
+        # 1. For the considered variable --> get all (CMOR entries, out_name) pairs in the CMOR table where out_name = variable
+        var_entries = [(f, cmor_dict[f]['out_name']) for f in cmor_dict if cmor_dict[f]['out_name'] == variable]
+        # 2. Raise an error if no corresponding out_name found (i.e., var_entires = [])
+        if not var_entries:
+            print_err("CMOR entry with out_name {} could not be found in CMOR table".format(variable))
+            raise KeyboardInterrupt
+        # 2. If only one pair --> consider this entry
+        if len(var_entries) == 1:
+            cmor_entry = var_entries[0][0]
+        else:
+            # 3. If several entries --> apply additional tests to the file (i.e., is_climatology, has_7_pressure_levels, etc.)
+            # Make "variable" as CMOR entry to consider by default/roollback in case of no successful test.
+            cmor_entry = variable
+            if not axis:
+                for test in [t for t in dir(self) if t.startswith('_test')]:
+                    suffix = getattr(self, test)(**{'infile': infile, 'variable': variable})
+                    # If one test is successful, get the appropriate suffix
+                    # Test if "variable" + "suffix" exists as a CMOR entry
+                    if suffix and variable + suffix in cmor_dict:
+                        cmor_entry = variable + suffix
+                        # Break the loop as no variable passes several tests.
+                        break
+            else:
+                for test in [t for t in dir(self) if t.startswith('_test_axis')]:
+                    suffix = getattr(self, test)(**{'infile': infile, 'variable': variable})
+                    # If one test is successful, get the appropriate suffix
+                    # Test if "variable" + "suffix" exists as a CMOR entry
+                    if suffix and variable + suffix in cmor_dict:
+                        cmor_entry = variable + suffix
+                        # Break the loop as no variable passes several tests.
+                        break
+        return cmor_entry
 
     def ControlVocab(self, ncfile, variable=None, print_all=True):
         """
@@ -347,33 +406,47 @@ class checkCMIP6(object):
         # -------------------------------------------------------------------
         #  Open file in processing
         # -------------------------------------------------------------------
-        infile = Cdunif.CdunifFile(ncfile, "r")
-        # -------------------------------------------------------------------
-        #  Get filename
-        # -------------------------------------------------------------------
-        filename = os.path.basename(ncfile)
+        infile = cdms2.open(ncfile, "r")
+        # Check that data_specs_version, table_id and variable_id attributes exist.
+        if not infile.getglobal('variable_id'):
+            print_err("The global attribute 'variable_id' could not be found in file.")
+            raise KeyboardInterrupt
+        if not infile.getglobal('table_id'):
+            print_err("The global attribute 'table_id' could not be found in file.")
+            raise KeyboardInterrupt
+        if not infile.getglobal('data_specs_version'):
+            print_err("The global attribute 'data_specs_version' could not be found in file.")
+            raise KeyboardInterrupt
         # -------------------------------------------------------------------
         #  Initialize arrays
         # -------------------------------------------------------------------
         # If table_path is the table directory
-        # Deduce corresponding JSON from filename
+        # Deduce corresponding JSON MIP table
         if os.path.isdir(self.cmip6_table_path):
             # In case automated DR version switch is implemented elsewhere out of PrePARE
             # Skip if the --table-path ends with "Tables" or a DR tag (e.g., 01.00.28)
             if self.cmip6_table_path.endswith('Tables') or self.cmip6_table_path.endswith(infile.data_specs_version):
                 cmip6_table = '{}/CMIP6_{}.json'.format(
                     self.cmip6_table_path,
-                    self._get_table_from_filename(filename))
+                    infile.table_id)
+                cmip6_coordinates = '{}/CMIP6_coordinate.json'.format(
+                    self.cmip6_table_path)
             else:
                 cmip6_table = '{}/{}/CMIP6_{}.json'.format(
                     self.cmip6_table_path,
                     infile.data_specs_version,
-                    self._get_table_from_filename(filename))
+                    infile.table_id)
+                cmip6_coordinates = '{}/{}/CMIP6_coordinate.json'.format(
+                    self.cmip6_table_path,
+                    infile.data_specs_version)
         else:
             cmip6_table = self.cmip6_table_path
+            cmip6_coordinates = os.path.join(os.path.dirname(self.cmip6_table_path), 'CMIP6_coordinate.json')
         table_id = os.path.basename(os.path.splitext(cmip6_table)[0]).split('_')[1]
         # Check and get JSON table
         cmor_table = self._check_json_table(cmip6_table)
+        # Check and get coordinates table
+        coordinates_table = self._check_json_table(cmip6_coordinates)
         # -------------------------------------------------------------------
         # Load CMIP6 table into memory
         # -------------------------------------------------------------------
@@ -381,62 +454,33 @@ class checkCMIP6(object):
         # -------------------------------------------------------------------
         #  Deduce variable
         # -------------------------------------------------------------------
-        # If variable can be deduced from the filename (Default)
+        # If variable can be deduced from the file attributes (Default)
         # If not variable submitted on command line with --variable is considered
-        variable_id = self._get_variable_from_filename(filename)
+        variable_id = infile.variable_id
         if not variable:
             variable = variable_id
         # -------------------------------------------------------------------
-        #  Distinguish similar CMOR entries with the same out_name if exist
+        #  Get CMOR entry corresponding to the file variable
         # -------------------------------------------------------------------
-        # The goal is to deduce here the CMOR entry to consider for the check.
-        # Some variables (called "out_names" into CMOR table) corresponds to several CMOR entries in the same table.
-        # i.e., several CMOR entries have the same out_name value.
-        # 1. For the considered variable --> get all (CMOR entries, out_name) pairs in the CMOR table where out_name = variable
         cmor_entries = cmor_table['variable_entry']
-        var_entries = [(f, cmor_entries[f]['out_name']) for f in cmor_entries if cmor_entries[f]['out_name'] == variable]
-        # 2. Raise an error if no corresponding out_name found (i.e., var_entires = [])
-        if not var_entries:
-            print(BCOLORS.FAIL)
-            print("==========================================================================")
-            print("CMOR entry with out_name " + variable + " could not be found in CMOR table")
-            print("==========================================================================")
-            print(BCOLORS.ENDC)
-            raise KeyboardInterrupt
-        # 2. If only one pair --> consider this entry
-        if len(var_entries) == 1:
-            variable_cmor_entry = var_entries[0][0]
-        else:
-        # 3. If several entries --> apply additional tests to the file (i.e., is_climatology, has_7_pressure_levels, etc.)
-            # Make "variable" as CMOR entry to consider by default/roollback in case of no successful test.
-            variable_cmor_entry = variable
-            for test in [t for t in dir(self) if t.startswith('_test')]:
-                suffix = getattr(self, test)(**{'infile': infile, 'variable': variable, 'filename': filename})
-                # If one test is successful, get the appropriate suffix
-                # Test if "variable" + "suffix" exists as a CMOR entry
-                if suffix and variable + suffix in cmor_entries:
-                    variable_cmor_entry = variable + suffix
-                    # Break the loop as no variable passes several tests.
-                    break
+        variable_cmor_entry = self._find_cmor_entry(variable=variable,
+                                                    infile=infile,
+                                                    cmor_dict=cmor_entries)
         #  -------------------------------------------------------------------
         #  Get variable out name in netCDF record
         #  -------------------------------------------------------------------
         # Variable record name should follow CMOR table out names
-        if variable_cmor_entry not in list(cmor_table['variable_entry'].keys()):
-            print(BCOLORS.FAIL)
-            print("=====================================================================================")
-            print("The entry " + variable_cmor_entry + " could not be found in CMOR table")
-            print("=====================================================================================")
-            print(BCOLORS.ENDC)
+        if variable_cmor_entry not in list(cmor_entries.keys()):
+            print_err("The entry " + variable_cmor_entry + " could not be found in CMOR table")
             raise KeyboardInterrupt
-        variable_record_name = cmor_table['variable_entry'][variable_cmor_entry]['out_name']
+        variable_record_name = cmor_entries[variable_cmor_entry]['out_name']
         # Variable id attribute should be the same as variable record name
         # in any case to be CF- and CMIP6-compliant
         variable_id = variable_record_name
         # -------------------------------------------------------------------
         # Create a dictionary of all global attributes
         # -------------------------------------------------------------------
-        self.dictGbl = infile.__dict__
+        self.dictGbl = infile.attributes
         for key, value in list(self.dictGbl.items()):
             cmip6_cv.set_cur_dataset_attribute(key, value)
         # Set member_id attribute depending on sub_experiment_id and variant_label
@@ -452,13 +496,9 @@ class checkCMIP6(object):
         # Create a dictionary of attributes for the variable
         # -------------------------------------------------------------------
         try:
-            self.dictVar = infile.variables[variable_record_name].__dict__
+            self.dictVar = infile.variables[variable_record_name].attributes
         except BaseException:
-            print(BCOLORS.FAIL)
-            print("=====================================================================================")
-            print("The variable " + variable_record_name + " could not be found in file")
-            print("=====================================================================================")
-            print(BCOLORS.ENDC)
+            print_err("The variable " + variable_record_name + " could not be found in file")
             raise KeyboardInterrupt
 
         # -------------------------------------------------------------------
@@ -476,50 +516,112 @@ class checkCMIP6(object):
             if attr in list(self.dictGbl.keys()):
                 self.set_double_value(attr)
                 if not isinstance(self.dictGbl[attr], numpy.float64):
-                    print(BCOLORS.FAIL)
-                    print("=====================================================================================")
-                    print("{} is not a double: ".format(attr), type(self.dictGbl[attr]))
-                    print("=====================================================================================")
-                    print(BCOLORS.ENDC)
+                    print_err("{} is not a double: {}".format(attr, type(self.dictGbl[attr])))
                     self.errors += 1
         for attr in ['realization_index', 'initialization_index', 'physics_index', 'forcing_index']:
             if not isinstance(self.dictGbl[attr], numpy.ndarray):
-                print(BCOLORS.FAIL)
-                print("=====================================================================================")
-                print("{} is not an integer: ".format(attr), type(self.dictGbl[attr]))
-                print("=====================================================================================")
-                print(BCOLORS.ENDC)
+                print_err("{} is not an integer: {}".format(attr, type(self.dictGbl[attr])))
                 self.errors += 1
         self.errors += cmip6_cv.check_parentExpID(table)
         for attr in ['table_id', 'variable_id']:
             try:
                 if locals()[attr] != self.dictGbl[attr]:
-                    print(BCOLORS.FAIL)
-                    print("=====================================================================================")
-                    print("{} attribute is not consistent: ".format(attr), self.dictGbl[attr])
-                    print("=====================================================================================")
-                    print(BCOLORS.ENDC)
+                    print_err("{} attribute is not consistent: {}".format(attr, self.dictGbl[attr]))
                     self.errors += 1
             except KeyError:
-                print(BCOLORS.FAIL)
-                print("=====================================================================================")
-                print("{} attribute is missing in global attributes".format(attr))
-                print("=====================================================================================")
-                print(BCOLORS.ENDC)
+                print_err("{} attribute is missing in global attributes".format(attr))
                 self.errors += 1
+
+        # -------------------------------------------------------------------
+        # Check variable coordinates
+        # -------------------------------------------------------------------
+        cmor_entries = coordinates_table['axis_entry']
+        # Get variable shape from infile
+        axis_ids = infile.variables[variable_record_name].getAxisIds()
+        # Check variable coordinates
+        for axis_id in axis_ids:
+            # -------------------------------------------------------------------
+            #  Get CMOR entry corresponding to the axis id
+            # -------------------------------------------------------------------
+            axis_cmor_entry = self._find_cmor_entry(variable=axis_id,
+                                                    infile=infile,
+                                                    cmor_dict=cmor_entries,
+                                                    axis=True)
+            #  -------------------------------------------------------------------
+            #  Get axis out name in netCDF record
+            #  -------------------------------------------------------------------
+            # Axis record name should follow CMOR table out names
+            if axis_cmor_entry not in list(cmor_entries.keys()):
+                print_err("The entry {} could not be found in CMOR table".format(axis_cmor_entry))
+                raise KeyboardInterrupt
+            cv_attrs = cmor_entries[axis_cmor_entry]
+            # Axis id attribute should be the same as axis record name
+            # in any case to be CF- and CMIP6-compliant
+            axis_id = cv_attrs['out_name']
+            #  -------------------------------------------------------------------
+            #  Get axis CV attr
+            #  -------------------------------------------------------------------
+            self.dictAxis = infile.axes[axis_id].attributes
+            #  -------------------------------------------------------------------
+            #  Check axis CV attr
+            #  -------------------------------------------------------------------
+            for key in cv_attrs:
+                if key in self._AXIS_IGNORED_ATTRS:
+                    continue
+                # Is this attribute in file?
+                if key in list(self.dictAxis.keys()):
+                    # Verify that attribute value is equal to file attribute
+                    table_value = cv_attrs[key]
+                    file_value = self.dictAxis[key]
+                    # PrePARE accept units of 1 or 1.0 so adjust the table_value
+                    if key == "units":
+                        if "time" in axis_id and infile.axes[axis_id].units.startswith("days since"):
+                            table_value = file_value
+                        if (table_value == "1") and (file_value == "1.0"):
+                            table_value = "1.0"
+                        if (table_value == "1.0") and (file_value == "1"):
+                            table_value = "1"
+                    if isinstance(table_value, str) and isinstance(file_value, numpy.ndarray):
+                        if numpy.array([int(value) for value in table_value.split()] == file_value).all():
+                            file_value = True
+                            table_value = True
+                    if isinstance(table_value, numpy.ndarray):
+                        table_value = table_value[0]
+                    if isinstance(file_value, numpy.ndarray):
+                        file_value = file_value[0]
+                    if isinstance(table_value, float):
+                        if abs(table_value - file_value) <= 0.00001 * abs(table_value):
+                            table_value = file_value
+                    if key == "climatology" and self._test_is_climatology(infile):
+                        table_value = "climatology_bounds"
+                    if str(table_value) != str(file_value):
+                        print_err("Your file contains \"{0}: \"{1}\" and\n "
+                                  "CMIP6 tables requires \"{0}\": \"{2}\".".format(key,
+                                                                                   str(file_value),
+                                                                                   str(table_value)))
+                        self.errors += 1
+                elif cv_attrs[key] != "":
+                    # That attribute is not in the axis metadata
+                    table_value = cv_attrs[key]
+                    if isinstance(table_value, numpy.ndarray):
+                        table_value = table_value[0]
+                    if isinstance(table_value, float):
+                        table_value = "{0:.2g}".format(table_value)
+                    print_err("CMIP6 axis {} requires \"{}\": \"{}\".".format(axis_id, key, str(table_value)))
+                    self.errors += 1
+
         # -------------------------------------------------------------------
         # Get time axis properties
         # -------------------------------------------------------------------
         # Get calendar and time units
         try:
-            calendar = infile.variables['time'].calendar
-            timeunits = infile.variables['time'].units
+            calendar = infile.axes['time'].calendar
+            timeunits = infile.axes['time'].units
         except BaseException:
             calendar = "gregorian"
             timeunits = "days since ?"
         # Get first and last time bounds
-
-        climatology = self.is_climatology(filename)
+        climatology = self._test_is_climatology(infile)
         if climatology:
             if cmip6_table.find('Amon') != -1:
                 variable = '{}Clim'.format(variable)
@@ -529,10 +631,10 @@ class checkCMIP6(object):
             var = [variable[:clim_idx]]
 
         try:
-            if 'bounds' in list(infile.variables['time'].__dict__.keys()):
-                bndsvar = infile.variables['time'].__dict__['bounds']
-            elif 'climatology' in list(infile.variables['time'].__dict__.keys()):
-                bndsvar = infile.variables['time'].__dict__['climatology']
+            if 'bounds' in list(infile.axes['time'].attributes.key()):
+                bndsvar = infile.axes['time'].bounds
+            elif 'climatology' in list(infile.axes['time'].attributes.keys()):
+                bndsvar = infile.axes['time'].climatology
             else:
                 bndsvar = 'time_bnds'
             startimebnds = infile.variables[bndsvar][0][0]
@@ -542,8 +644,8 @@ class checkCMIP6(object):
             endtimebnds = 0
 
         try:
-            startime = infile.variables['time'][0]
-            endtime = infile.variables['time'][-1]
+            startime = infile.axes['time'][0]
+            endtime = infile.axes['time'][-1]
         except BaseException:
             startime = 0
             endtime = 0
@@ -559,11 +661,7 @@ class checkCMIP6(object):
                                         startimebnds,
                                         endtimebnds)
         if varid == -1:
-            print(BCOLORS.FAIL)
-            print("=====================================================================================")
-            print("Could not find variable {} in table {} ".format(variable_cmor_entry, cmip6_table))
-            print("=====================================================================================")
-            print(BCOLORS.ENDC)
+            print_err("Could not find variable {} in table {} ".format(variable_cmor_entry, cmip6_table))
             raise KeyboardInterrupt
         # -------------------------------------------------------------------
         # Check filename
@@ -572,7 +670,7 @@ class checkCMIP6(object):
                                                varid,
                                                calendar,
                                                timeunits,
-                                               filename)
+                                               os.path.basename(infile.id))
         # -------------------------------------------------------------------
         # Check variable attributes
         # -------------------------------------------------------------------
@@ -622,21 +720,18 @@ class checkCMIP6(object):
                             tmp[param] = [str('{}: {}'.format(param, val1)), str('{}: {}'.format(param, val2))]
                         table_values.extend([' '.join(i) for i in list(itertools.product(*list(tmp.values())))])
                         if str(file_value) not in list(map(str, table_values)):
-                            print(BCOLORS.FAIL)
-                            print("=====================================================================================")
-                            print("Your file contains \"" + key + "\":\"" + str(file_value) + "\" and")
-                            print("CMIP6 tables requires \"" + key + "\":\"" + str(table_value) + "\".")
-                            print("=====================================================================================")
-                            print(BCOLORS.ENDC)
+                            print_err("Your file contains \"{0}: \"{1}\" and\n "
+                                      "CMIP6 tables requires \"{0}\": \"{2}\".".format(key,
+                                                                                       str(file_value),
+                                                                                       str(table_value)))
                             self.errors += 1
                         continue
 
                 if str(table_value) != str(file_value):
-                    print(BCOLORS.FAIL)
-                    print("=====================================================================================")
-                    print("Your file contains \"" + key + "\":\"" + str(file_value) + "\" and")
-                    print("CMIP6 tables requires \"" + key + "\":\"" + str(table_value) + "\".")
-                    print("=====================================================================================")
+                    print_err("Your file contains \"{0}: \"{1}\" and\n "
+                              "CMIP6 tables requires \"{0}\": \"{2}\".".format(key,
+                                                                               str(file_value),
+                                                                               str(table_value)))
                     print(BCOLORS.ENDC)
                     self.errors += 1
             else:
@@ -646,11 +741,8 @@ class checkCMIP6(object):
                     table_value = table_value[0]
                 if isinstance(table_value, float):
                     table_value = "{0:.2g}".format(table_value)
-                print(BCOLORS.FAIL)
-                print("=====================================================================================")
-                print("CMIP6 variable " + variable + " requires \"" + key + "\":\"" + str(table_value) + "\".")
-                print("=====================================================================================")
-                print(BCOLORS.ENDC)
+                print_err(
+                    "CMIP6 variable {} requires \"{}\": \"{}\".".format(variable_cmor_entry, key, str(table_value)))
                 self.errors += 1
         # Print final message
         if self.errors != 0:
@@ -871,7 +963,8 @@ def main():
     # Separate sequential process and multiprocessing
     if args.max_processes != 1:
         # Create pool of processes
-        pool = Pool(processes=args.max_processes, initializer=initializer, initargs=(list(cctx.keys()), list(cctx.values())))
+        pool = Pool(processes=args.max_processes, initializer=initializer,
+                    initargs=(list(cctx.keys()), list(cctx.values())))
         # Run processes
         logfiles = list()
         progress = 0
