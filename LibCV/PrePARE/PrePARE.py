@@ -27,17 +27,17 @@ import json
 import os
 import re
 import sys
-from fuzzywuzzy.process import extractOne
-from fuzzywuzzy.fuzz import partial_ratio
 from argparse import ArgumentTypeError
 from contextlib import contextmanager
 from datetime import datetime
 from multiprocessing import Pool
 from uuid import uuid4 as uuid
-
+from collections import namedtuple
 import cdms2
 import cmip6_cv
 import numpy
+from fuzzywuzzy.fuzz import partial_ratio
+from fuzzywuzzy.process import extractOne
 
 
 # =========================
@@ -195,25 +195,6 @@ class FilterCollection(object):
 
 
 # =========================
-# ProcessContext()
-# =========================
-class ProcessContext(object):
-    """
-    Encapsulates the processing context/information for child process.
-
-    :param dict args: Dictionary of argument to pass to child process
-    :returns: The processing context
-    :rtype: *ProcessContext*
-
-    """
-
-    def __init__(self, args):
-        assert isinstance(args, dict)
-        for key, value in list(args.items()):
-            setattr(self, key, value)
-
-
-# =========================
 # Print Error method()
 # =========================
 def print_err(msg):
@@ -259,6 +240,7 @@ class checkCMIP6(object):
         # -------------------------------------------------------------------
         self.dictGbl = dict()
         self.dictVar = dict()
+        self.dictAxis = dict()
         # -------------------------------------------------------------------
         # call setup() to clean all 'C' internal memory.
         # -------------------------------------------------------------------
@@ -494,7 +476,6 @@ class checkCMIP6(object):
         else:
             return None
 
-
     def _find_cmor_entry(self, variable, infile, cmor_dict, axis=False):
         # -------------------------------------------------------------------
         #  Distinguish similar CMOR entries with the same out_name if exist
@@ -502,7 +483,8 @@ class checkCMIP6(object):
         # The goal is to deduce here the CMOR entry to consider for the check.
         # Some variables (called "out_names" into CMOR table) corresponds to several CMOR entries in the same table.
         # i.e., several CMOR entries have the same out_name value.
-        # 1. For the considered variable --> get all (CMOR entries, out_name) pairs in the CMOR table where out_name = variable
+        # 1. For the considered variable --> get all (CMOR entries, out_name) pairs in the CMOR table
+        #    where out_name = variable
         var_entries = [(f, cmor_dict[f]['out_name']) for f in cmor_dict if cmor_dict[f]['out_name'] == variable]
         # 2. Raise an error if no corresponding out_name found (i.e., var_entires = [])
         if not var_entries:
@@ -512,8 +494,9 @@ class checkCMIP6(object):
         if len(var_entries) == 1:
             cmor_entry = var_entries[0][0]
         else:
-            # 3. If several entries --> apply additional tests to the file (i.e., is_climatology, has_7_pressure_levels, etc.)
-            # Make "variable" as CMOR entry to consider by default/roollback in case of no successful test.
+            # 3. If several entries --> apply additional tests to the file
+            #    (i.e., is_climatology, has_7_pressure_levels, etc.)
+            # Make "variable" as CMOR entry to consider by default/rollback in case of no successful test.
             cmor_entry = variable
             if not axis:
                 for test in [t for t in dir(self) if t.startswith('_test_var')]:
@@ -528,7 +511,8 @@ class checkCMIP6(object):
                 # Extract long_name attribute to help cmor_entry discrimination.
                 long_names = list()
                 if variable == 'lev':
-                    long_names = [(f, cmor_dict[f]['long_name']) for f in cmor_dict if cmor_dict[f]['out_name'] == variable]
+                    long_names = [(f, cmor_dict[f]['long_name']) for f in cmor_dict if
+                                  cmor_dict[f]['out_name'] == variable]
                 # Apply test related to the axis name.
                 if hasattr(self, '_test_axis_{}'):
                     entry = getattr(self, '_test_axis_{}'.format(variable))(**{'infile': infile,
@@ -747,7 +731,7 @@ class checkCMIP6(object):
                     if isinstance(table_value, float):
                         if abs(table_value - file_value) <= 0.00001 * abs(table_value):
                             table_value = file_value
-                    if key == "climatology" and self._test_is_climatology(infile):
+                    if key == "climatology" and self._test_var_is_climatology(infile):
                         table_value = "climatology_bounds"
                     if str(table_value) != str(file_value):
                         print_err("Your file contains \"{0}: \"{1}\" and\n "
@@ -776,7 +760,7 @@ class checkCMIP6(object):
             calendar = "gregorian"
             timeunits = "days since ?"
         # Get first and last time bounds
-        climatology = self._test_is_climatology(infile)
+        climatology = self._test_var_is_climatology(infile)
         if climatology:
             if cmip6_table.find('Amon') != -1:
                 variable = '{}Clim'.format(variable)
@@ -954,7 +938,7 @@ def initializer(keys, values):
     """
     assert len(keys) == len(values)
     global pctx
-    pctx = ProcessContext({key: values[i] for i, key in enumerate(keys)})
+    pctx = namedtuple("ChildProcess", keys)(*values)
 
 
 def regex_validator(string):
