@@ -27,6 +27,8 @@ import json
 import os
 import re
 import sys
+from fuzzywuzzy.process import extractOne
+from fuzzywuzzy.fuzz import partial_ratio
 from argparse import ArgumentTypeError
 from contextlib import contextmanager
 from datetime import datetime
@@ -321,28 +323,177 @@ class checkCMIP6(object):
                 cmip6_cv.set_cur_dataset_attribute(attribute, self.dictGbl[attribute])
 
     @staticmethod
-    def _test_is_climatology(infile, **kwargs):
+    def _test_var_is_climatology(infile, **kwargs):
         return 'Clim' if os.path.basename(infile.id).find('-clim') != -1 else None
 
     @staticmethod
-    def _test_has_3_dimensions(infile, variable, **kwargs):
+    def _test_var_has_3_dimensions(infile, variable, **kwargs):
         return '2d' if len(infile.variables[variable].listdimnames()) == 3 else None
 
     @staticmethod
-    def _test_has_27_pressure_levels(infile, **kwargs):
+    def _test_var_has_27_pressure_levels(infile, **kwargs):
         return '27' if 'plev' in infile.listdimension() and int(infile.axes['plev'].shape[0]) == 27 else None
 
     @staticmethod
-    def _test_has_7_pressure_levels(infile, **kwargs):
+    def _test_var_has_7_pressure_levels(infile, **kwargs):
         return '7h' if 'plev' in infile.listdimension() and int(infile.axes['plev'].shape[0]) == 7 else None
 
     @staticmethod
-    def _test_has_4_pressure_levels(infile, **kwargs):
+    def _test_var_has_4_pressure_levels(infile, **kwargs):
         return '4' if 'plev' in infile.listdimension() and int(infile.axes['plev'].shape[0]) == 4 else None
 
     @staticmethod
-    def _test_has_land_in_cell_methods(infile, variable, **kwargs):
+    def _test_var_has_land_in_cell_methods(infile, variable, **kwargs):
         return 'land' if 'land' in infile.variables[variable].cell_methods else None
+
+    @staticmethod
+    def _test_axis_time(infile, **kwargs):
+        if 'time' in infile.listdimension():
+            time = infile.axes['time']
+            if 'bounds' not in time.attributes:
+                return 'time1'
+            elif 'climatology' in time.attributes:
+                return 'time2'
+            else:
+                return 'time'
+        else:
+            return None
+
+    @staticmethod
+    def _test_axis_height(infile, **kwargs):
+        if 'height' in infile.listdimension() and int(infile.axes['height'].shape[0]) == 1:
+            height = infile.axes['height']
+            if height.getvalue() == 2.:
+                return 'height2m'
+            elif height.getvalue() == 10.:
+                return 'height10m'
+            elif height.getvalue() == 100.:
+                return 'height100m'
+            else:
+                return None
+        else:
+            return None
+
+    @staticmethod
+    def _test_axis_line(infile, **kwargs):
+        if 'line' in infile.listdimension():
+            if int(infile.axes['line'].shape[0]) >= 6:
+                return 'oline'
+            else:
+                return 'sline'
+        else:
+            return None
+
+    @staticmethod
+    def _test_axis_type(**kwargs):
+        # No "type" coordinate reflects a vector of PFT of vegetation type in CMIP6_coordinate.json.
+        # Set "type" equivalent to "vegtype" by default
+        # Consequently other "type" out_names won't be checked in any case as "type" is always mapped to "vegtype".
+        return 'vegtype'
+
+    @staticmethod
+    def _test_axis_plev(infile, **kwargs):
+        if 'plev' in infile.listdimension():
+            plev = infile.axes['plev']
+            if int(plev.shape[0]) == 1:
+                if plev.getValue() == 1000.:
+                    return 'p10'
+                elif plev.getValue() == 10000.:
+                    return 'p100'
+                elif plev.getValue() == 100000.:
+                    return 'p1000'
+                elif plev.getValue() == 20000.:
+                    return 'p200'
+                elif plev.getValue() == 22000.:
+                    return 'p220'
+                elif plev.getValue() == 50000.:
+                    return 'p500'
+                elif plev.getValue() == 56000.:
+                    return 'p560'
+                elif plev.getValue() == 70000.:
+                    if 'bounds' in plev.attributes:
+                        return 'pl700'
+                    else:
+                        return 'p700'
+                elif plev.getValue() == 84000.:
+                    return 'p840'
+                elif plev.getValue() == 85000.:
+                    return 'p850'
+                else:
+                    return None
+            elif int(plev.shape[0]) == 3:
+                if 'bounds' in plev.attributes:
+                    return 'plev3'
+                else:
+                    return 'plev3h'
+            elif int(plev.shape[0]) == 4:
+                return 'plev4'
+            elif int(plev.shape[0]) == 7:
+                if 'bounds' in plev.attributes:
+                    return 'plev7'
+                else:
+                    return 'plev7h'
+            elif int(plev.shape[0]) == 8:
+                return 'plev8'
+            elif int(plev.shape[0]) == 19:
+                return 'plev19'
+            elif int(plev.shape[0]) == 23:
+                return 'plev23'
+            elif int(plev.shape[0]) == 27:
+                return 'plev27'
+            elif int(plev.shape[0]) == 39:
+                return 'plev39'
+            else:
+                return None
+        else:
+            return None
+
+    @staticmethod
+    def _test_axis_depth(infile, **kwargs):
+        if 'depth' in infile.listdimension() and int(infile.axes['depth'].shape[0]) == 1:
+            depth = infile.axes['depth']
+            if depth.getValue() == 0.:
+                return 'depth0m'
+            elif depth.getValue() == 100.:
+                return 'depth100m'
+            elif depth.getValue() == 1000.:
+                return 'depth2000m'
+            elif depth.getValue() == 150.:
+                return 'depth300m'
+            elif depth.getValue() == 350.:
+                return 'depth700m'
+            elif depth.getValue() == 50.:
+                return 'olayer100m'
+            elif depth.getValue() == '':
+                return 'sdepth'
+            elif depth.getValue() == 0.05:
+                return 'sdepth1'
+            elif depth.getValue() == 0.5:
+                return 'sdepth10'
+            else:
+                return None
+        else:
+            return None
+
+    @staticmethod
+    def _test_axis_lev(infile, names, **kwargs):
+        if 'lev' in infile.listdimension():
+            if 'long_name' not in infile.axes['lev'].attributes:
+                return None
+            long_name = infile.axes['lev'].long_name
+            long_names = zip(*names)[1]
+            key, score = extractOne(long_name, long_names, scorer=partial_ratio)
+            if score >= 80:
+                idx = long_names.index(long_name)
+                if 'bounds' in infile.axes['lev'].attributes:
+                    return '{}_half'.format(names[idx][0])
+                else:
+                    return names[idx][0]
+            else:
+                return None
+        else:
+            return None
+
 
     def _find_cmor_entry(self, variable, infile, cmor_dict, axis=False):
         # -------------------------------------------------------------------
@@ -365,7 +516,7 @@ class checkCMIP6(object):
             # Make "variable" as CMOR entry to consider by default/roollback in case of no successful test.
             cmor_entry = variable
             if not axis:
-                for test in [t for t in dir(self) if t.startswith('_test')]:
+                for test in [t for t in dir(self) if t.startswith('_test_var')]:
                     suffix = getattr(self, test)(**{'infile': infile, 'variable': variable})
                     # If one test is successful, get the appropriate suffix
                     # Test if "variable" + "suffix" exists as a CMOR entry
@@ -374,14 +525,18 @@ class checkCMIP6(object):
                         # Break the loop as no variable passes several tests.
                         break
             else:
-                for test in [t for t in dir(self) if t.startswith('_test_axis')]:
-                    suffix = getattr(self, test)(**{'infile': infile, 'variable': variable})
-                    # If one test is successful, get the appropriate suffix
-                    # Test if "variable" + "suffix" exists as a CMOR entry
-                    if suffix and variable + suffix in cmor_dict:
-                        cmor_entry = variable + suffix
-                        # Break the loop as no variable passes several tests.
-                        break
+                # Extract long_name attribute to help cmor_entry discrimination.
+                long_names = list()
+                if variable == 'lev':
+                    long_names = [(f, cmor_dict[f]['long_name']) for f in cmor_dict if cmor_dict[f]['out_name'] == variable]
+                # Apply test related to the axis name.
+                if hasattr(self, '_test_axis_{}'):
+                    entry = getattr(self, '_test_axis_{}'.format(variable))(**{'infile': infile,
+                                                                               'variable': variable,
+                                                                               'names': long_names})
+                    # Return entry if not None
+                    if entry:
+                        cmor_entry = entry
         return cmor_entry
 
     def ControlVocab(self, ncfile, variable=None, print_all=True):
